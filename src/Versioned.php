@@ -2,29 +2,31 @@
 
 namespace SilverStripe\Versioned;
 
+use Doctrine\DBAL\Connection;
+use InvalidArgumentException;
+use LogicException;
+use SilverStripe\Control\Cookie;
+use SilverStripe\Control\Director;
 use SilverStripe\Control\HTTPRequest;
 use SilverStripe\Control\Session;
-use SilverStripe\Control\Director;
-use SilverStripe\Control\Cookie;
-use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\ClassInfo;
+use SilverStripe\Core\Config\Config;
+use SilverStripe\Core\Convert;
 use SilverStripe\Core\Resettable;
 use SilverStripe\Dev\Deprecation;
 use SilverStripe\Forms\FieldList;
-use SilverStripe\ORM\DataQuery;
-use SilverStripe\ORM\DataObject;
-use SilverStripe\ORM\DB;
 use SilverStripe\ORM\ArrayList;
-use SilverStripe\ORM\DataList;
 use SilverStripe\ORM\DataExtension;
+use SilverStripe\ORM\DataList;
+use SilverStripe\ORM\DataObject;
+use SilverStripe\ORM\DataQuery;
+use SilverStripe\ORM\DB;
 use SilverStripe\ORM\FieldType\DBDatetime;
+use SilverStripe\ORM\FieldType\DBField;
 use SilverStripe\ORM\Queries\SQLSelect;
-use SilverStripe\ORM\Queries\SQLUpdate;
 use SilverStripe\Security\Member;
 use SilverStripe\Security\Permission;
 use SilverStripe\View\TemplateGlobalProvider;
-use InvalidArgumentException;
-use LogicException;
 
 /**
  * The Versioned extension allows your DataObjects to have several versions,
@@ -317,16 +319,19 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
 
         // Build query
-        $table = "\"{$baseTable}_Versions\"";
-        $query = SQLSelect::create('"LastEdited"', $table)
-            ->addWhere([
-                "{$table}.\"RecordID\"" => $id,
-                "{$table}.\"Version\"" => $version
-            ]);
-        $date = $query->execute()->value();
+        $table = "{$baseTable}_Versions";
+        $qb = DB::get_conn()->createQueryBuilder();
+        $qb->select(Convert::symbol2sql('LastEdited'))
+           ->from($table)
+           ->where(
+               $qb->expr()->eq(Convert::symbol2sql("{$table}.RecordID"), $qb->createPositionalParameter($id)),
+               $qb->expr()->eq(Convert::symbol2sql("{$table}.Version"), $qb->createPositionalParameter($version))
+           );
+        $date = $qb->execute()->fetchColumn();
         if ($date) {
             $this->versionModifiedCache[$key] = $date;
         }
+
         return $date;
     }
 
@@ -390,7 +395,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $baseTable = $this->baseTable();
         $versionedMode = $dataQuery->getQueryParam('Versioned.mode');
         switch ($versionedMode) {
-        // Reading a specific stage (Stage or Live)
+            // Reading a specific stage (Stage or Live)
             case 'stage':
                 // Check if we need to rewrite this table
                 $stage = $dataQuery->getQueryParam('Versioned.stage');
@@ -407,7 +412,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 }
                 break;
 
-        // Reading a specific stage, but only return items that aren't in any other stage
+            // Reading a specific stage, but only return items that aren't in any other stage
             case 'stage_unique':
                 if (!$this->hasStages()) {
                     break;
@@ -427,15 +432,26 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                         continue;
                     }
 
-                    $tempName = 'ExclusionarySource_'.$excluding;
+                    $tempName = 'ExclusionarySource_' . $excluding;
                     $excludingTable = $this->baseTable($excluding);
 
-                    $query->addWhere('"'.$baseTable.'"."ID" NOT IN (SELECT "ID" FROM "'.$tempName.'")');
+                    // @todo - try to get this into a QB
+                    $query->addWhere(
+                        DB::get_conn()->getExpressionBuilder()->notIn(
+                            Convert::symbol2sql("{$baseTable}.ID"),
+                            DB::get_conn()
+                              ->createQueryBuilder()
+                              ->select(Convert::symbol2sql('ID'))
+                              ->from(Convert::symbol2sql($tempName))
+                              ->getSQL()
+                        )
+                    );
+
                     $query->renameTable($tempName, $excludingTable);
                 }
                 break;
 
-        // Return all version instances
+            // Return all version instances
             case 'archive':
             case 'all_versions':
             case 'latest_versions':
@@ -449,8 +465,13 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                         // Make sure join includes version as well
                         $query->setJoinFilter(
                             $alias,
-                            "\"{$alias}_Versions\".\"RecordID\" = \"{$baseTable}_Versions\".\"RecordID\""
-                            . " AND \"{$alias}_Versions\".\"Version\" = \"{$baseTable}_Versions\".\"Version\""
+                            sprintf(
+                                '%s = %s AND %s = %s',
+                                Convert::symbol2sql("{$alias}_Versions.RecordID"),
+                                Convert::symbol2sql("{$baseTable}_Versions.RecordID"),
+                                Convert::symbol2sql("{$alias}_Versions.Version"),
+                                Convert::symbol2sql("{$baseTable}_Versions.Version")
+                            )
                         );
                     }
                     $query->renameTable($alias, $alias . '_Versions');
@@ -458,56 +479,89 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
 
                 // Add all <basetable>_Versions columns
                 foreach (Config::inst()->get(static::class, 'db_for_versions_table') as $name => $type) {
-                    $query->selectField(sprintf('"%s_Versions"."%s"', $baseTable, $name), $name);
+                    $query->selectField(Convert::symbol2sql(sprintf('%s_Versions.%s', $baseTable, $name)), $name);
                 }
 
                 // Alias the record ID as the row ID, and ensure ID filters are aliased correctly
-                $query->selectField("\"{$baseTable}_Versions\".\"RecordID\"", "ID");
-                $query->replaceText("\"{$baseTable}_Versions\".\"ID\"", "\"{$baseTable}_Versions\".\"RecordID\"");
+                $query->selectField(Convert::symbol2sql("{$baseTable}_Versions.RecordID"), "ID");
+                $query->replaceText(Convert::symbol2sql("{$baseTable}_Versions.ID"),
+                    Convert::symbol2sql("{$baseTable}_Versions.RecordID"));
 
                 // However, if doing count, undo rewrite of "ID" column
                 $query->replaceText(
-                    "count(DISTINCT \"{$baseTable}_Versions\".\"RecordID\")",
-                    "count(DISTINCT \"{$baseTable}_Versions\".\"ID\")"
+                    DB::get_conn()->getDatabasePlatform()->getCountExpression(sprintf('DISTINCT %s',
+                        Convert::symbol2sql("{$baseTable}_Versions.RecordID"))),
+                    DB::get_conn()->getDatabasePlatform()->getCountExpression(sprintf('DISTINCT %s',
+                        Convert::symbol2sql("{$baseTable}_Versions.ID")))
                 );
 
-                    // Add additional versioning filters
+                // Add additional versioning filters
                 switch ($versionedMode) {
                     case 'archive': {
                         $date = $dataQuery->getQueryParam('Versioned.date');
                         if (!$date) {
                             throw new InvalidArgumentException("Invalid archive date");
                         }
+                        $qb = DB::get_conn()->createQueryBuilder();
                         // Link to the version archived on that date
                         $query->addWhere([
-                            "\"{$baseTable}_Versions\".\"Version\" IN
-						(SELECT LatestVersion FROM
-							(SELECT
-								\"{$baseTable}_Versions\".\"RecordID\",
-								MAX(\"{$baseTable}_Versions\".\"Version\") AS LatestVersion
-								FROM \"{$baseTable}_Versions\"
-								WHERE \"{$baseTable}_Versions\".\"LastEdited\" <= ?
-								GROUP BY \"{$baseTable}_Versions\".\"RecordID\"
-							) AS \"{$baseTable}_Versions_Latest\"
-							WHERE \"{$baseTable}_Versions_Latest\".\"RecordID\" = \"{$baseTable}_Versions\".\"RecordID\"
-						)" => $date
+                            $qb->expr()->in(
+                                Convert::symbol2sql("{$baseTable}_Versions.Version"),
+                                $qb->select(Convert::symbol2sql('LatestVersion'))
+                                   ->from('(' .
+                                          DB::get_conn()->createQueryBuilder()
+                                            ->select(Convert::symbol2sql("{$baseTable}_Versions.RecordID"))
+                                            ->addSelect(
+                                                $qb->getConnection()->getDatabasePlatform()->getMaxExpression(
+                                                    Convert::symbol2sql("{$baseTable}_Versions.Version")
+                                                ) . ' AS ' . Convert::symbol2sql('LatestVersion')
+                                            )
+                                            ->from(Convert::symbol2sql("{$baseTable}_Versions"))
+                                            ->where(
+                                                $qb->expr()->lte(
+                                                    Convert::symbol2sql("{$baseTable}_Versions.LastEdited"),
+                                                    '?'
+                                                )
+                                            )
+                                            ->groupBy(Convert::symbol2sql("${baseTable}_Versions.RecordID"))
+                                            ->getSQL() . ') AS ' . Convert::symbol2sql("{$baseTable}_Versions_Latest")
+                                   )
+                                   ->where(
+                                       $qb->expr()->eq(
+                                           Convert::symbol2sql("{$baseTable}_Versions_Latest.RecordID"),
+                                           Convert::symbol2sql("{$baseTable}_Versions.RecordID")
+                                       )
+                                   )->getSQL()
+                            ) => $date
                         ]);
                         break;
                     }
                     case 'latest_versions': {
                         // Return latest version instances, regardless of whether they are on a particular stage
-                        // This provides "show all, including deleted" functonality
+                        // This provides "show all, including deleted" functionality
+                        $qb = DB::get_conn()->createQueryBuilder();
                         $query->addWhere(
-                            "\"{$baseTable}_Versions\".\"Version\" IN
-						(SELECT LatestVersion FROM
-							(SELECT
-								\"{$baseTable}_Versions\".\"RecordID\",
-								MAX(\"{$baseTable}_Versions\".\"Version\") AS LatestVersion
-								FROM \"{$baseTable}_Versions\"
-								GROUP BY \"{$baseTable}_Versions\".\"RecordID\"
-							) AS \"{$baseTable}_Versions_Latest\"
-							WHERE \"{$baseTable}_Versions_Latest\".\"RecordID\" = \"{$baseTable}_Versions\".\"RecordID\"
-						)"
+                            $qb->expr()->in(
+                                Convert::symbol2sql("{$baseTable}_Versions.Version"),
+                                $qb->select(Convert::symbol2sql('LatestVersion'))
+                                   ->from('(' .
+                                          DB::get_conn()->createQueryBuilder()
+                                            ->select(Convert::symbol2sql("{$baseTable}_Versions.RecordID"))
+                                            ->addSelect($qb->getConnection()->getDatabasePlatform()->getMaxExpression(
+                                                    Convert::symbol2sql("{$baseTable}_Versions.Version")
+                                                ) . ' AS ' . Convert::symbol2sql('LatestVersion')
+                                            )
+                                            ->from(Convert::symbol2sql("{$baseTable}_Versions"))
+                                            ->groupBy(Convert::symbol2sql("${baseTable}_Versions.RecordID"))
+                                            ->getSQL() . ') AS ' . Convert::symbol2sql("{$baseTable}_Versions_Latest")
+                                   )
+                                   ->where(
+                                       $qb->expr()->eq(
+                                           Convert::symbol2sql("{$baseTable}_Versions_Latest.RecordID"),
+                                           Convert::symbol2sql("{$baseTable}_Versions.RecordID")
+                                       )
+                                   )->getSQL()
+                            )
                         );
                         break;
                     }
@@ -518,21 +572,23 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                             throw new InvalidArgumentException("Invalid version");
                         }
                         $query->addWhere([
-                            "\"{$baseTable}_Versions\".\"Version\"" => $version
+                            Convert::symbol2sql("{$baseTable}_Versions.Version") => $version
                         ]);
                         break;
                     }
                     case 'all_versions':
                     default: {
                         // If all versions are requested, ensure that records are sorted by this field
-                        $query->addOrderBy(sprintf('"%s_Versions"."%s"', $baseTable, 'Version'));
+                        $query->addOrderBy(
+                            Convert::symbol2sql("{$baseTable}_Versions.Version")
+                        );
                         break;
                     }
                 }
                 break;
             default:
                 throw new InvalidArgumentException("Bad value for query parameter Versioned.mode: "
-                . $dataQuery->getQueryParam('Versioned.mode'));
+                                                   . $dataQuery->getQueryParam('Versioned.mode'));
         }
     }
 
@@ -582,8 +638,8 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         // accidentally querying the *_Versions tables.
         $versionedMode = $dataObject->getSourceQueryParam('Versioned.mode');
         $modesToAllowVersioning = ['all_versions', 'latest_versions', 'archive', 'version'];
-        if (!empty($dataObject->Version) &&
-            (!empty($versionedMode) && in_array($versionedMode, $modesToAllowVersioning))
+        if (!empty($dataObject->Version)
+            && (!empty($versionedMode) && in_array($versionedMode, $modesToAllowVersioning))
         ) {
             // This will ensure that augmentSQL will select only the same version as the owner,
             // regardless of how this object was initially selected
@@ -595,7 +651,10 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
     }
 
-    public function augmentDatabase()
+    /**
+     * @param \Doctrine\DBAL\Schema\Schema $dbSchema
+     */
+    public function augmentDatabase($dbSchema)
     {
         $owner = $this->owner;
         $class = get_class($owner);
@@ -632,7 +691,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
             }
 
             $fields = $schema->databaseFields($class, false);
-            unset($fields['ID']);
+            //unset($fields['ID']);
             if ($fields) {
                 $options = Config::inst()->get($class, 'create_table_options');
                 $indexes = $schema->databaseIndexes($class, false);
@@ -654,7 +713,13 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 // Build _Live table
                 if ($this->hasStages()) {
                     $liveTable = $this->stageTable($suffixTable, static::LIVE);
-                    DB::require_table($liveTable, $fields, $indexes, false, $options);
+                    $dbTable = $dbSchema->createTable($liveTable);
+                    foreach ($fields as $fieldName => $fieldType) {
+                        /** @var DBField $field */
+                        $fieldSpec = Object::parse_class_spec($fieldType);
+                        $field = DBField::create_field($fieldSpec[0], null, $fieldName);
+                        $field->augmentDBTable($dbTable);
+                    }
                 }
 
                 // Build _Versions table
@@ -682,8 +747,8 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                     $versionIndexes = array_merge(
                         [
                             'RecordID_Version' => [
-                                'type' => 'unique',
-                                'columns' => ['RecordID', 'Version']
+                            	'type' => 'unique',
+	                            'columns' => ['RecordID','Version'],
                             ],
                             'RecordID' => [
                                 'type' => 'index',
@@ -701,14 +766,14 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 // Cleanup any orphans
                 $this->cleanupVersionedOrphans("{$suffixBaseTable}_Versions", "{$suffixTable}_Versions");
 
-                // Build versions table
-                DB::require_table("{$suffixTable}_Versions", $versionFields, $versionIndexes, true, $options);
-            } else {
-                DB::dont_require_table("{$suffixTable}_Versions");
-                if ($this->hasStages()) {
-                    $liveTable = $this->stageTable($suffixTable, static::LIVE);
-                    DB::dont_require_table($liveTable);
+                $dbTable = $dbSchema->createTable("{$suffixTable}_Versions");
+                foreach ($versionFields as $fieldName => $fieldType) {
+                    /** @var DBField $field */
+                    $fieldSpec = Object::parse_class_spec($fieldType);
+                    $field = DBField::create_field($fieldSpec[0], null, $fieldName);
+                    $field->augmentDBTable($dbTable);
                 }
+
             }
         }
     }
@@ -722,7 +787,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     protected function cleanupVersionedOrphans($baseTable, $childTable)
     {
         // Skip if child table doesn't exist
-        if (!DB::get_schema()->hasTable($childTable)) {
+        if (!in_array($childTable, DB::get_conn()->getSchemaManager()->listTableNames())) {
             return;
         }
         // Skip if tables are the same
@@ -731,29 +796,49 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
 
         // Select all orphaned version records
-        $orphanedQuery = SQLSelect::create()
-            ->selectField("\"{$childTable}\".\"ID\"")
-            ->setFrom("\"{$childTable}\"");
+        $qb = DB::get_conn()->createQueryBuilder();
+        $qb->select(Convert::symbol2sql("{$childTable}.ID"))
+           ->from(Convert::symbol2sql($childTable));
 
         // If we have a parent table limit orphaned records
         // to only those that exist in this
-        if (DB::get_schema()->hasTable($baseTable)) {
-            $orphanedQuery
-                ->addLeftJoin(
-                    $baseTable,
-                    "\"{$childTable}\".\"RecordID\" = \"{$baseTable}\".\"RecordID\"
-					AND \"{$childTable}\".\"Version\" = \"{$baseTable}\".\"Version\""
+        if (in_array($baseTable, DB::get_conn()->getSchemaManager()->listTableNames())) {
+            $qb->leftJoin(
+                Convert::symbol2sql($baseTable),
+                Convert::symbol2sql($childTable),
+                null,
+                $qb->expr()->andX(
+                    $qb->expr()->eq(
+                        Convert::symbol2sql("{$childTable}.RecordID"),
+                        Convert::symbol2sql("{$baseTable}.RecordID")
+                    ),
+                    $qb->expr()->eq(
+                        Convert::symbol2sql("{$childTable}.Version"),
+                        Convert::symbol2sql("{$baseTable}.Version")
+                    )
                 )
-                ->addWhere("\"{$baseTable}\".\"ID\" IS NULL");
+            );
+            $qb->where(
+                $qb->expr()->isNull(Convert::symbol2sql("{$baseTable}.ID"))
+            );
         }
 
-        $count = $orphanedQuery->count();
+        $countQB = clone $qb;
+        $countQB->select(DB::get_conn()
+                           ->getDatabasePlatform()
+                           ->getCountExpression(Convert::symbol2sql("{$childTable}.ID")));
+        $count = $countQB->execute()->fetchColumn();
         if ($count > 0) {
             DB::alteration_message("Removing {$count} orphaned versioned records", "deleted");
-            $ids = $orphanedQuery->execute()->column();
-            foreach ($ids as $id) {
-                DB::prepared_query("DELETE FROM \"{$childTable}\" WHERE \"ID\" = ?", [$id]);
-            }
+            $ids = $qb->execute()->fetchAll(\PDO::FETCH_ASSOC);
+            $deleteQB = DB::get_conn()->createQueryBuilder();
+            $deleteQB->delete(Convert::symbol2sql($childTable))
+                     ->where(
+                         $deleteQB->expr()
+                                  ->eq(Convert::symbol2sql('ID'),
+                                      $qb->createPositionalParameter($ids, Connection::PARAM_INT_ARRAY))
+                     );
+            $deleteQB->execute();
         }
     }
 
@@ -770,6 +855,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 $spec['type'] = 'index';
             }
         }
+
         return $indexes;
     }
 
@@ -795,7 +881,14 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         ];
 
         // Add any extra, unchanged fields to the version record.
-        $data = DB::prepared_query("SELECT * FROM \"{$table}\" WHERE \"ID\" = ?", [$recordID])->record();
+        $qb = DB::get_conn()->createQueryBuilder();
+        $qb->select('*')
+           ->from(Convert::symbol2sql($table))
+           ->where($qb->expr()->eq(
+               Convert::symbol2sql('ID'),
+               $qb->createPositionalParameter($recordID)
+           ));
+        $data = $qb->execute()->fetch(\PDO::FETCH_ASSOC);
 
         if ($data) {
             $fields = $schema->databaseFields($class, false);
@@ -818,11 +911,13 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         // Generate next version ID to use
         $nextVersion = 0;
         if ($recordID) {
-            $nextVersion = DB::prepared_query(
-                "SELECT MAX(\"Version\") + 1
-				FROM \"{$baseDataTable}_Versions\" WHERE \"RecordID\" = ?",
-                [$recordID]
-            )->value();
+            $qb = DB::get_conn()->createQueryBuilder();
+            $qb->select(DB::get_conn()->getDatabasePlatform()->getMaxExpression(
+                Convert::symbol2sql('Version')
+            ));
+            $qb->from(Convert::symbol2sql("{$baseDataTable}_Versions"));
+            $qb->where($qb->expr()->eq(Convert::symbol2sql('RecordID'), $qb->createPositionalParameter($recordID)));
+            $nextVersion = $qb->execute()->fetchColumn() + 1;
         }
         $nextVersion = $nextVersion ?: 1;
 
@@ -851,10 +946,14 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     {
         // If the record has already been inserted in the (table), get rid of it.
         if ($manipulation[$table]['command'] == 'insert') {
-            DB::prepared_query(
-                "DELETE FROM \"{$table}\" WHERE \"ID\" = ?",
-                [$recordID]
-            );
+            $qb = DB::get_conn()->createQueryBuilder();
+            $qb->delete(Convert::symbol2sql($table))
+               ->where(
+                   $qb->expr()->eq(
+                       Convert::symbol2sql('ID'),
+                       $qb->createPositionalParameter($recordID)
+                   )
+               )->execute();
         }
 
         $newTable = $this->stageTable($table, Versioned::get_stage());
@@ -1089,6 +1188,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 ];
             }
         }
+
         return $lookup;
     }
 
@@ -1140,6 +1240,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 }
             }
         }
+
         return $list;
     }
 
@@ -1165,6 +1266,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         foreach ($items as $item) {
             $this->mergeRelatedObject($list, $added, $item);
         }
+
         return $added;
     }
 
@@ -1330,6 +1432,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         if ($this->owner->canViewVersioned($member) === false) {
             return false;
         }
+
         return null;
     }
 
@@ -1386,6 +1489,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         // Fall back to default permission check
         $permissions = Config::inst()->get(get_class($owner), 'non_live_permissions');
         $check = Permission::checkMember($member, $permissions);
+
         return (bool)$check;
     }
 
@@ -1411,6 +1515,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $versionFromStage = DataObject::get(get_class($owner))->byID($owner->ID);
 
         Versioned::set_reading_mode($oldMode);
+
         return $versionFromStage ? $versionFromStage->canView($member) : false;
     }
 
@@ -1424,8 +1529,8 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     public function canBeVersioned($class)
     {
         return ClassInfo::exists($class)
-            && is_subclass_of($class, DataObject::class)
-            && DataObject::getSchema()->classHasTable($class);
+               && is_subclass_of($class, DataObject::class)
+               && DataObject::getSchema()->classHasTable($class);
     }
 
     /**
@@ -1439,6 +1544,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     {
         // Base table has version field
         $class = DataObject::getSchema()->tableClass($table);
+
         return $class === DataObject::getSchema()->baseDataClass($class);
     }
 
@@ -1478,12 +1584,30 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $draftTable = $this->baseTable();
         $liveTable = $this->stageTable($draftTable, static::LIVE);
 
-        return DB::prepared_query(
-            "SELECT \"$draftTable\".\"Version\" = \"$liveTable\".\"Version\" FROM \"$draftTable\"
-			 INNER JOIN \"$liveTable\" ON \"$draftTable\".\"ID\" = \"$liveTable\".\"ID\"
-			 WHERE \"$draftTable\".\"ID\" = ?",
-            [$owner->ID]
-        )->value();
+        $qb = DB::get_conn()->createQueryBuilder();
+
+        return $qb->select(
+            $qb->expr()->eq(
+                Convert::symbol2sql("{$draftTable}.Version"),
+                Convert::symbol2sql("{$liveTable}.Version")
+            )
+        )
+                  ->from(Convert::symbol2sql($draftTable))
+                  ->innerJoin(
+                      Convert::symbol2sql($draftTable),
+                      Convert::symbol2sql($liveTable),
+                      null,
+                      $qb->expr()->eq(
+                          Convert::symbol2sql("{$draftTable}.ID"),
+                          Convert::symbol2sql("{$liveTable}.ID")
+                      )
+                  )
+                  ->where(
+                      $qb->expr()->eq(
+                          Convert::symbol2sql("{$draftTable}.ID"),
+                          $qb->createPositionalParameter($owner->ID)
+                      )
+                  )->execute()->fetchColumn();
     }
 
     /**
@@ -1492,6 +1616,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     public function doPublish()
     {
         Deprecation::notice('5.0', 'Use publishRecursive instead');
+
         return $this->owner->publishRecursive();
     }
 
@@ -1515,6 +1640,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         );
         $changeset->write();
         $changeset->addObject($this->owner);
+
         return $changeset->publish();
     }
 
@@ -1534,6 +1660,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $owner->write();
         $owner->copyVersionToStage(static::DRAFT, static::LIVE);
         $owner->invokeWithExtensions('onAfterPublish');
+
         return true;
     }
 
@@ -1572,39 +1699,53 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
 
             // Generate update query which will unlink disowned objects
             $targetTable = $this->stageTable($joinTable, $targetStage);
-            $disowned = new SQLUpdate("\"{$targetTable}\"");
-            $disowned->assign("\"{$idField}\"", 0);
-            $disowned->addWhere([
-                "\"{$targetTable}\".\"{$idField}\"" => $owner->ID
-            ]);
+            $disownedQB = DB::get_conn()->createQueryBuilder();
+            $disownedQB->update(Convert::symbol2sql($targetTable))
+                       ->set(Convert::symbol2sql($idField), 0)
+                       ->where(
+                           Convert::symbol2sql("{$targetTable}.{$idField}"),
+                           $disownedQB->createPositionalParameter($owner->ID)
+                       );
 
             // Build exclusion list (items to owned objects we need to keep)
             $sourceTable = $this->stageTable($joinTable, $sourceStage);
-            $owned = new SQLSelect("\"{$sourceTable}\".\"ID\"", "\"{$sourceTable}\"");
-            $owned->addWhere([
-                "\"{$sourceTable}\".\"{$idField}\"" => $owner->ID
-            ]);
+            $ownedQB = DB::get_conn()->createQueryBuilder();
+            $ownedQB->select(Convert::symbol2sql("{$sourceTable}.ID"))
+                    ->from(Convert::symbol2sql($sourceTable))
+                    ->where(
+                        Convert::symbol2sql("{$sourceTable}.{$idField}"),
+                        $ownedQB->createPositionalParameter($owner->ID)
+                    );
 
             // Apply class condition if querying on polymorphic has_one
             if ($polymorphic) {
-                $disowned->assign("\"{$joinField}Class\"", null);
-                $disowned->addWhere([
-                    "\"{$targetTable}\".\"{$joinField}Class\"" => get_class($owner)
-                ]);
-                $owned->addWhere([
-                    "\"{$sourceTable}\".\"{$joinField}Class\"" => get_class($owner)
-                ]);
+                $disownedQB->set(Convert::symbol2sql("{$joinField}Class"), null);
+                $disownedQB->andWhere(
+                    Convert::symbol2sql("{$targetTable}.{$joinField}Class"),
+                    $disownedQB->createPositionalParameter(get_class($owner))
+                );
+                $ownedQB->andWhere(
+                    Convert::symbol2sql("{$sourceTable}.{$joinField}Class"),
+                    $ownedQB->createPositionalParameter(get_class($owner))
+                );
             }
 
             // Merge queries and perform unlink
-            $ownedSQL = $owned->sql($ownedParams);
-            $disowned->addWhere([
-                "\"{$targetTable}\".\"ID\" NOT IN ({$ownedSQL})" => $ownedParams
-            ]);
+            $ownedSQL = $ownedQB->getSQL();
+            $disownedQB->andWhere(
+                $disownedQB->expr()->notIn(
+                    Convert::sql2symbol("{$targetTable}.ID"),
+                    $ownedSQL
+                )
+            );
 
-            $owner->extend('updateDisownershipQuery', $disowned, $sourceStage, $targetStage, $relationship);
+            foreach ($ownedQB->getParameters() as $key => $param) {
+                $disownedQB->createPositionalParameter($param, $ownedQB->getParameterType($key));
+            }
 
-            $disowned->execute();
+            $owner->extend('updateDisownershipQuery', $disownedQB, $sourceStage, $targetStage, $relationship);
+
+            $disownedQB->execute();
         }
     }
 
@@ -1680,6 +1821,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         static::set_reading_mode($origReadingMode);
 
         $owner->invokeWithExtensions('onAfterUnpublish');
+
         return true;
     }
 
@@ -1713,6 +1855,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $owner->invokeWithExtensions('onBeforeRevertToLive');
         $owner->copyVersionToStage(static::LIVE, static::DRAFT, false);
         $owner->invokeWithExtensions('onAfterRevertToLive');
+
         return true;
     }
 
@@ -1724,7 +1867,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $owner = $this->owner;
         /** @var Versioned|DataObject $liveOwner */
         $liveOwner = static::get_by_stage(get_class($owner), static::LIVE)
-            ->byID($owner->ID);
+                           ->byID($owner->ID);
 
         // Revert any owned objects from the live stage only
         foreach ($liveOwner->findOwned(false) as $object) {
@@ -1769,7 +1912,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         } else {
             $owner->flushCache();
             $from = Versioned::get_one_by_stage($baseClass, $fromStage, [
-                "\"{$baseTable}\".\"ID\" = ?" => $owner->ID
+                sprintf('%s = %s', Convert::symbol2sql("{$baseTable}.ID"), '?') => $owner->ID
             ]);
         }
         if (!$from) {
@@ -1786,12 +1929,17 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
             // Mark this version as having been published at some stage
             $publisherID = isset(Member::currentUser()->ID) ? Member::currentUser()->ID : 0;
             $extTable = $this->extendWithSuffix($baseTable);
-            DB::prepared_query(
-                "UPDATE \"{$extTable}_Versions\"
-				SET \"WasPublished\" = ?, \"PublisherID\" = ?
-				WHERE \"RecordID\" = ? AND \"Version\" = ?",
-                [1, $publisherID, $from->ID, $from->Version]
-            );
+            $qb = DB::get_conn()->createQueryBuilder();
+            $qb->update(Convert::symbol2sql("{$extTable}_Versions"))
+               ->set(Convert::symbol2sql('WasPublished'), $qb->createPositionalParameter(true, \PDO::PARAM_BOOL))
+               ->set(Convert::symbol2sql('PublisherID'), $qb->createPositionalParameter($publisherID))
+               ->where(
+                   $qb->expr()->andX(
+                       $qb->expr()->eq(Convert::symbol2sql('RecordID'), $qb->createPositionalParameter($from->ID)),
+                       $qb->expr()->eq(Convert::symbol2sql('Version'), $qb->createPositionalParameter($from->Version))
+                   )
+               );
+            $qb->execute();
         }
 
         // Change to new stage, write, and revert state
@@ -1850,12 +1998,28 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         // will be false.
 
         // TODO: DB Abstraction: if statement here:
-        $stagesAreEqual = DB::prepared_query(
-            "SELECT CASE WHEN \"$table1\".\"Version\"=\"$table2\".\"Version\" THEN 1 ELSE 0 END
-			 FROM \"$table1\" INNER JOIN \"$table2\" ON \"$table1\".\"ID\" = \"$table2\".\"ID\"
-			 AND \"$table1\".\"ID\" = ?",
-            [$id]
-        )->value();
+        $qb = DB::get_conn()->createQueryBuilder();
+        $stagesAreEqual = $qb->select(
+            sprintf('CASE WHEN %s = %s THEN 1 ELSE 0 END', Convert::symbol2sql("{$table1}.Version"),
+                Convert::symbol2sql("{$table2}.Version"))
+        )
+                             ->from(Convert::symbol2sql($table1))
+                             ->innerJoin(
+                                 Convert::symbol2sql($table1),
+                                 Convert::symbol2sql($table2),
+                                 null,
+                                 $qb->expr()->andX(
+                                     $qb->expr()->eq(
+                                         Convert::symbol2sql("{$table1}.ID"),
+                                         Convert::symbol2sql("{$table2}.ID")
+                                     ),
+                                     $qb->expr()->eq(
+                                         Convert::symbol2sql("{$table1}.ID"),
+                                         $id
+                                     )
+                                 )
+                             )
+                             ->execute()->fetchColumn();
 
         return !$stagesAreEqual;
     }
@@ -1905,7 +2069,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
             } elseif (is_string($tableJoin) && substr($tableJoin, 0, 5) != 'INNER') {
                 $query->setFrom([
                     $table => "LEFT JOIN \"$table\" ON \"$table\".\"RecordID\"=\"{$baseTable}_Versions\".\"RecordID\""
-                        . " AND \"$table\".\"Version\" = \"{$baseTable}_Versions\".\"Version\""
+                              . " AND \"$table\".\"Version\" = \"{$baseTable}_Versions\".\"Version\""
                 ]);
             }
             $query->renameTable($table, $table . '_Versions');
@@ -1930,6 +2094,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
 
         Versioned::set_reading_mode($oldMode);
+
         return $versions;
     }
 
@@ -1963,6 +2128,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     protected function baseTable($stage = null)
     {
         $baseTable = $this->owner->baseTable();
+
         return $this->stageTable($baseTable, $stage);
     }
 
@@ -1980,6 +2146,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         if ($this->hasStages() && $stage === static::LIVE) {
             return "{$table}_{$stage}";
         }
+
         return $table;
     }
 
@@ -2004,6 +2171,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         // Check permissions with member ID in session.
         $member = Member::currentUser();
         $permissions = Config::inst()->get(get_called_class(), 'non_live_permissions');
+
         return $member && Permission::checkMember($member, $permissions);
     }
 
@@ -2096,6 +2264,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         if ($parts[0] == 'Stage') {
             return $parts[1];
         }
+
         return null;
     }
 
@@ -2110,6 +2279,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         if ($parts[0] == 'Archive') {
             return $parts[1];
         }
+
         return null;
     }
 
@@ -2181,10 +2351,15 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
 
         // get version as performance-optimized SQL query (gets called for each record in the sitetree)
-        $version = DB::prepared_query(
-            "SELECT \"Version\" FROM \"$stageTable\" WHERE \"ID\" = ?",
-            [$id]
-        )->value();
+        $qb = DB::get_conn()->createQueryBuilder();
+        $qb->select(Convert::symbol2sql('Version'))
+           ->from(Convert::symbol2sql($stageTable))
+           ->where($qb->expr()->eq(
+               Convert::symbol2sql('ID'),
+               $qb->createPositionalParameter($id)
+           ));
+
+        $version = $qb->execute()->fetchColumn();
 
         // cache value (if required)
         if ($cache) {
@@ -2228,7 +2403,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                     );
                 }
             }
-            $filter = 'WHERE "ID" IN ('.DB::placeholders($idList).')';
+            $filter = 'WHERE "ID" IN (' . DB::placeholders($idList) . ')';
             $parameters = $idList;
         }
 
@@ -2357,7 +2532,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     {
         $baseClass = DataObject::getSchema()->baseDataClass($class);
         $list = DataList::create($baseClass)
-            ->setDataQueryParam("Versioned.mode", "latest_versions");
+                        ->setDataQueryParam("Versioned.mode", "latest_versions");
 
         return $list->byID($id);
     }
@@ -2401,11 +2576,12 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
 
         $table = $this->baseTable(static::LIVE);
-        $result = DB::prepared_query(
-            "SELECT COUNT(*) FROM \"{$table}\" WHERE \"{$table}\".\"ID\" = ?",
-            [$id]
-        );
-        return (bool)$result->value();
+        $qb = DB::get_conn()->createQueryBuilder();
+        $qb->select(DB::get_conn()->getDatabasePlatform()->getCountExpression('*'))
+           ->from(Convert::symbol2sql($table))
+           ->where($qb->expr()->eq(Convert::symbol2sql("{$table}.ID"), $qb->createNamedParameter($id)));
+
+        return (bool)$qb->execute()->fetchColumn();
     }
 
     /**
@@ -2416,6 +2592,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     public function isArchived()
     {
         $id = $this->owner->ID ?: $this->owner->OldID;
+
         return $id && !$this->isOnDraft() && !$this->isPublished();
     }
 
@@ -2432,11 +2609,13 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         }
 
         $table = $this->baseTable();
-        $result = DB::prepared_query(
-            "SELECT COUNT(*) FROM \"{$table}\" WHERE \"{$table}\".\"ID\" = ?",
-            [$id]
-        );
-        return (bool)$result->value();
+        $qb = DB::get_conn()->createQueryBuilder();
+
+        return (bool)$qb->select(DB::get_conn()->getDatabasePlatform()->getCountExpression('*'))
+                        ->from(Convert::symbol2sql($table))
+                        ->where(
+                            Convert::symbol2sql("{$table}.ID", $qb->createPositionalParameter($id))
+                        )->execute()->fetchColumn();
     }
 
     /**
@@ -2486,9 +2665,9 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     public static function get_including_deleted($class, $filter = "", $sort = "")
     {
         $list = DataList::create($class)
-            ->where($filter)
-            ->sort($sort)
-            ->setDataQueryParam("Versioned.mode", "latest_versions");
+                        ->where($filter)
+                        ->sort($sort)
+                        ->setDataQueryParam("Versioned.mode", "latest_versions");
 
         return $list;
     }
@@ -2510,10 +2689,10 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     {
         $baseClass = DataObject::getSchema()->baseDataClass($class);
         $list = DataList::create($baseClass)
-            ->setDataQueryParam([
-                "Versioned.mode" => 'version',
-                "Versioned.version" => $version
-            ]);
+                        ->setDataQueryParam([
+                            "Versioned.mode" => 'version',
+                            "Versioned.version" => $version
+                        ]);
 
         return $list->byID($id);
     }
@@ -2529,8 +2708,8 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
     public static function get_all_versions($class, $id)
     {
         $list = DataList::create($class)
-            ->filter('ID', $id)
-            ->setDataQueryParam('Versioned.mode', 'all_versions');
+                        ->filter('ID', $id)
+                        ->setDataQueryParam('Versioned.mode', 'all_versions');
 
         return $list;
     }
@@ -2576,7 +2755,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
      */
     public function cacheKeyComponent()
     {
-        return 'versionedmode-'.static::get_reading_mode();
+        return 'versionedmode-' . static::get_reading_mode();
     }
 
     /**
