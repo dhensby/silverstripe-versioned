@@ -20,6 +20,7 @@ use SilverStripe\Core\Convert;
 use SilverStripe\Core\ClassInfo;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Extension;
+use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Core\Resettable;
 use SilverStripe\Dev\Deprecation;
 use SilverStripe\Forms\FieldList;
@@ -714,11 +715,12 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 // Build _Live table
                 if ($this->hasStages()) {
                     $liveTable = $this->stageTable($suffixTable, static::LIVE);
-                    $dbTable = $dbSchema->createTable($liveTable);
+                    $dbTable = $dbSchema->createTable(Convert::symbol2sql($liveTable));
                     foreach ($fields as $fieldName => $fieldType) {
                         /** @var DBField $field */
-                        $fieldSpec = Object::parse_class_spec($fieldType);
-                        $field = DBField::create_field($fieldSpec[0], null, $fieldName);
+	                    $fieldSpec = Object::parse_class_spec($fieldType);
+	                    array_unshift($fieldSpec[1], $fieldName);
+	                    $field = Injector::inst()->createWithArgs($fieldSpec[0], $fieldSpec[1]);
                         $field->augmentDBTable($dbTable);
                     }
                 }
@@ -767,12 +769,13 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 // Cleanup any orphans
                 $this->cleanupVersionedOrphans("{$suffixBaseTable}_Versions", "{$suffixTable}_Versions");
 
-                $dbTable = $dbSchema->createTable("{$suffixTable}_Versions");
+                $dbTable = $dbSchema->createTable(Convert::symbol2sql("{$suffixTable}_Versions"));
                 foreach ($versionFields as $fieldName => $fieldType) {
-                    /** @var DBField $field */
-                    $fieldSpec = Object::parse_class_spec($fieldType);
-                    $field = DBField::create_field($fieldSpec[0], null, $fieldName);
-                    $field->augmentDBTable($dbTable);
+	                /** @var DBField $field */
+	                $fieldSpec = Object::parse_class_spec($fieldType);
+	                array_unshift($fieldSpec[1], $fieldName);
+	                $field = Injector::inst()->createWithArgs($fieldSpec[0], $fieldSpec[1]);
+	                $field->augmentDBTable($dbTable);
                 }
 
             }
