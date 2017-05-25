@@ -717,7 +717,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                     $dbTable = $dbSchema->createTable(Convert::symbol2sql($liveTable));
                     foreach ($fields as $fieldName => $fieldType) {
                         /** @var DBField $field */
-	                    $fieldSpec = Object::parse_class_spec($fieldType);
+	                    $fieldSpec = ClassInfo::parse_class_spec($fieldType);
 	                    array_unshift($fieldSpec[1], $fieldName);
 	                    $field = Injector::inst()->createWithArgs($fieldSpec[0], $fieldSpec[1]);
                         $field->augmentDBTable($dbTable);
@@ -771,7 +771,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
                 $dbTable = $dbSchema->createTable(Convert::symbol2sql("{$suffixTable}_Versions"));
                 foreach ($versionFields as $fieldName => $fieldType) {
 	                /** @var DBField $field */
-	                $fieldSpec = Object::parse_class_spec($fieldType);
+	                $fieldSpec = ClassInfo::parse_class_spec($fieldType);
 	                array_unshift($fieldSpec[1], $fieldName);
 	                $field = Injector::inst()->createWithArgs($fieldSpec[0], $fieldSpec[1]);
 	                $field->augmentDBTable($dbTable);
