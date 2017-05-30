@@ -778,6 +778,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
 	                $field->augmentDBTable($dbTable);
                 }
 
+                // @todo iterate over many_many indexes and create them
             }
         }
     }
