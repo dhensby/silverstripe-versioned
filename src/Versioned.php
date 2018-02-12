@@ -7,36 +7,22 @@ use InvalidArgumentException;
 use LogicException;
 use SilverStripe\Control\Cookie;
 use SilverStripe\Control\Director;
-use InvalidArgumentException;
-use LogicException;
 use SilverStripe\Control\Controller;
-use SilverStripe\Control\Cookie;
-use SilverStripe\Control\Director;
 use SilverStripe\Control\HTTPRequest;
-use SilverStripe\Control\Session;
 use SilverStripe\Core\ClassInfo;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Convert;
-use SilverStripe\Core\ClassInfo;
-use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Extension;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\Core\Resettable;
 use SilverStripe\Dev\Deprecation;
 use SilverStripe\Forms\FieldList;
-use SilverStripe\ORM\ArrayList;
 use SilverStripe\ORM\DataExtension;
 use SilverStripe\ORM\DataList;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DataQuery;
 use SilverStripe\ORM\DB;
-use SilverStripe\ORM\FieldType\DBDatetime;
 use SilverStripe\ORM\FieldType\DBField;
-use SilverStripe\ORM\DataExtension;
-use SilverStripe\ORM\DataList;
-use SilverStripe\ORM\DataObject;
-use SilverStripe\ORM\DataQuery;
-use SilverStripe\ORM\DB;
 use SilverStripe\ORM\Queries\SQLSelect;
 use SilverStripe\Security\Member;
 use SilverStripe\Security\Permission;
@@ -809,8 +795,8 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         // to only those that exist in this
         if (in_array($baseTable, DB::get_conn()->getSchemaManager()->listTableNames())) {
             $qb->leftJoin(
-                Convert::symbol2sql($baseTable),
                 Convert::symbol2sql($childTable),
+                Convert::symbol2sql($baseTable),
                 null,
                 $qb->expr()->andX(
                     $qb->expr()->eq(
