@@ -134,7 +134,7 @@ class ChangeSet extends DataObject
             throw new LogicException("The current member does not have permission to publish this ChangeSet.");
         }
 
-        DB::get_conn()->withTransaction(function () {
+        DB::get_conn()->transactional(function () {
             foreach ($this->Changes() as $change) {
                 /** @var ChangeSetItem $change */
                 $change->publish();
