@@ -2043,7 +2043,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
         $baseTable = $singleton->baseTable();
         $stageTable = $singleton->stageTable($baseTable, $stage);
 
-        $versions = DB::prepared_query("SELECT \"ID\", \"Version\" FROM \"$stageTable\" $filter", $parameters)->map();
+        $versions = DB::prepared_query("SELECT ID, Version FROM $stageTable $filter", $parameters)->fetchAll(\PDO::FETCH_ASSOC);
 
         foreach ($versions as $id => $version) {
             self::$cache_versionnumber[$baseClass][$stage][$id] = $version;

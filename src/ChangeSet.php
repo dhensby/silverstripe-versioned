@@ -77,7 +77,7 @@ class ChangeSet extends DataObject
         'Details' => 'Text',
     ];
 
-    private static $default_sort = '"ChangeSet"."State" ASC, "ChangeSet"."ID" ASC';
+    private static $default_sort = 'ChangeSet.State ASC, ChangeSet.ID ASC';
 
     /**
      * List of classes to set apart in description
@@ -303,7 +303,7 @@ class ChangeSet extends DataObject
         }
 
         // Start a transaction (if we can)
-        DB::get_conn()->withTransaction(function () {
+        DB::get_conn()->transactional(function () {
 
             // Get the implicitly included items for this ChangeSet
             $implicit = $this->calculateImplicit();
