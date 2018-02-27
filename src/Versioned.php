@@ -4,6 +4,7 @@ namespace SilverStripe\Versioned;
 
 use InvalidArgumentException;
 use LogicException;
+use Ramsey\Uuid\Uuid;
 use SilverStripe\Control\Controller;
 use SilverStripe\Control\Cookie;
 use SilverStripe\Control\Director;
@@ -127,6 +128,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
      * @var array $db_for_versions_table
      */
     private static $db_for_versions_table = [
+        "ID" => "PrimaryKey",
         "RecordID" => "Int",
         "Version" => "Int",
         "WasPublished" => "Boolean",
@@ -613,7 +615,6 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
             }
 
             $fields = $schema->databaseFields($class, false);
-            unset($fields['ID']);
             if ($fields) {
                 $options = Config::inst()->get($class, 'create_table_options');
                 $indexes = $schema->databaseIndexes($class, false);
@@ -797,7 +798,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
 
         // Ensure that the ID is instead written to the RecordID field
         $newManipulation['fields']['RecordID'] = $recordID;
-        unset($newManipulation['fields']['ID']);
+        $newManipulation['fields']['ID'] = Uuid::uuid4()->toString();
 
         // Generate next version ID to use
         $nextVersion = 0;
@@ -1839,7 +1840,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
      *
      * @param string $class Class to search
      * @param string $stage Stage name
-     * @param int $id ID of the record
+     * @param string $id ID of the record
      * @param bool $cache Set to true to turn on cache
      * @return int|null Return the version number, or null if not on this stage
      */
@@ -2072,7 +2073,7 @@ class Versioned extends DataExtension implements TemplateGlobalProvider, Resetta
      */
     public function isPublished()
     {
-        $id = $this->owner->ID ?: $this->owner->OldID;
+        $id = $this->owner->OldID ?: $this->owner->ID;
         if (!$id) {
             return false;
         }

@@ -24,8 +24,8 @@ use SilverStripe\Security\Security;
  *
  * @property string $Added
  * @property string $ObjectClass The _base_ data class for the referenced DataObject
- * @property int $ObjectID The numeric ID for the referenced object
- * @property int $ChangeSetID ID of parent ChangeSet object
+ * @property string $ObjectID The ID for the referenced object
+ * @property string $ChangeSetID ID of parent ChangeSet object
  * @property int $VersionBefore
  * @property int $VersionAfter
  * @method ManyManyList ReferencedBy() List of explicit items that require this change
@@ -474,7 +474,7 @@ class ChangeSetItem extends DataObject implements Thumbnail
     /**
      * Get the ChangeSetItems that reference a passed DataObject
      *
-     * @param int $objectID The ID of the object
+     * @param string $objectID The ID of the object
      * @param string $objectClass The class of the object (or any parent class)
      * @return DataList
      */
